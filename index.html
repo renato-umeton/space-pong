@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
     <title>Ping Pong</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
@@ -20,6 +20,10 @@
             align-items: center;
             height: 100vh;
             overflow: hidden;
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         canvas {
@@ -136,9 +140,73 @@
         const ballTrail = [];
         const TRAIL_LENGTH = 12;
 
+        // --- Touch Input ---
+        const touches = {}; // active touches by identifier
+        let touchP1Y = null; // target Y for player 1 (left side touch)
+        let touchP2Y = null; // target Y for player 2 (right side touch)
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) {
+                touches[t.identifier] = { x: t.clientX, y: t.clientY };
+                handleTouchAt(t.clientX, t.clientY);
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) {
+                touches[t.identifier] = { x: t.clientX, y: t.clientY };
+            }
+            updateTouchPaddles();
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            for (const t of e.changedTouches) {
+                const wasTouch = touches[t.identifier];
+                delete touches[t.identifier];
+                // Clear paddle targets if no touches remain on that side
+                if (wasTouch) {
+                    let hasLeft = false, hasRight = false;
+                    for (const id in touches) {
+                        if (touches[id].x < canvas.width / 2) hasLeft = true;
+                        else hasRight = true;
+                    }
+                    if (!hasLeft) touchP1Y = null;
+                    if (!hasRight) touchP2Y = null;
+                }
+            }
+        }, { passive: false });
+
+        function handleTouchAt(x, y) {
+            // Simulate click for buttons
+            mouse.x = x;
+            mouse.y = y;
+            mouse.clicked = true;
+        }
+
+        function updateTouchPaddles() {
+            for (const id in touches) {
+                const t = touches[id];
+                if (state.gameMode === '1P') {
+                    // In 1P mode, any touch controls player 1
+                    touchP1Y = t.y;
+                } else {
+                    // In 2P mode, left half = P1, right half = P2
+                    if (t.x < canvas.width / 2) {
+                        touchP1Y = t.y;
+                    } else {
+                        touchP2Y = t.y;
+                    }
+                }
+            }
+        }
+
         // --- Game State ---
         const state = {
-            phase: 'TITLE', // TITLE | PLAYING | SCORED | PAUSED | CONFIRM_HOME | GAME_OVER
+            gameMode: null, // '1P' | '2P'
+            phase: 'TITLE', // TITLE | MODE_SELECT | PLAYING | SCORED | PAUSED | CONFIRM_HOME | GAME_OVER
             pauseTimer: 0,
             paddle1: { x: 0, y: 0 },
             paddle2: { x: 0, y: 0 },
@@ -219,6 +287,49 @@
             return mouse.clicked && isButtonHovered(id);
         }
 
+        // --- AI ---
+        const AI_REACTION_DELAY = 0.06; // smoothing factor (lower = slower reaction)
+        let aiTargetY = null;
+        let aiUpdateTimer = 0;
+
+        function updateAI() {
+            const s = getScale();
+            const h2 = getPlayerPaddleH('p2');
+            const paddleCenter = state.paddle2.y + h2 / 2;
+
+            // Only track ball when it's moving toward AI
+            if (state.ball.vx > 0) {
+                // Predict where ball will arrive at paddle x
+                const distX = state.paddle2.x - state.ball.x;
+                const timeToArrive = distX / state.ball.vx;
+                let predictedY = state.ball.y + state.ball.vy * timeToArrive;
+
+                // Bounce prediction off walls
+                const bounces = 3;
+                let py = predictedY;
+                for (let i = 0; i < bounces; i++) {
+                    if (py < 0) py = -py;
+                    if (py > canvas.height) py = 2 * canvas.height - py;
+                }
+
+                // Add slight imperfection
+                const imperfection = (Math.sin(state.time * 0.03) * h2 * 0.3);
+                aiTargetY = py + imperfection;
+            } else {
+                // Ball moving away: drift toward center
+                aiTargetY = canvas.height / 2;
+            }
+
+            if (aiTargetY !== null) {
+                const diff = aiTargetY - paddleCenter;
+                const sp2 = getPlayerPaddleSpeed('p2');
+                const move = Math.sign(diff) * Math.min(Math.abs(diff) * AI_REACTION_DELAY * 3, sp2);
+                state.paddle2.y += move;
+            }
+
+            state.paddle2.y = Math.max(0, Math.min(canvas.height - h2, state.paddle2.y));
+        }
+
         // --- Paddles ---
         function updatePaddles() {
             const sp1 = getPlayerPaddleSpeed('p1');
@@ -226,13 +337,36 @@
             const h1 = getPlayerPaddleH('p1');
             const h2 = getPlayerPaddleH('p2');
 
+            // Keyboard controls
             if (keys['KeyW']) state.paddle1.y -= sp1;
             if (keys['KeyS']) state.paddle1.y += sp1;
-            if (keys['ArrowUp']) state.paddle2.y -= sp2;
-            if (keys['ArrowDown']) state.paddle2.y += sp2;
+
+            // Touch controls for P1
+            if (touchP1Y !== null) {
+                const targetY = touchP1Y - h1 / 2;
+                const diff = targetY - state.paddle1.y;
+                state.paddle1.y += diff * 0.25; // smooth follow
+            }
+
+            if (state.gameMode === '1P') {
+                // AI controls P2
+                updateAI();
+            } else {
+                // Keyboard controls for P2
+                if (keys['ArrowUp']) state.paddle2.y -= sp2;
+                if (keys['ArrowDown']) state.paddle2.y += sp2;
+
+                // Touch controls for P2
+                if (touchP2Y !== null) {
+                    const targetY = touchP2Y - h2 / 2;
+                    const diff = targetY - state.paddle2.y;
+                    state.paddle2.y += diff * 0.25;
+                }
+
+                state.paddle2.y = Math.max(0, Math.min(canvas.height - h2, state.paddle2.y));
+            }
 
             state.paddle1.y = Math.max(0, Math.min(canvas.height - h1, state.paddle1.y));
-            state.paddle2.y = Math.max(0, Math.min(canvas.height - h2, state.paddle2.y));
         }
 
         function drawPaddle(x, y, w, h, color, glowColor) {
@@ -649,9 +783,9 @@
             ctx.font = '700 ' + fontSize + 'px Orbitron, monospace';
             ctx.textAlign = 'center';
             ctx.fillStyle = COLORS.paddle1;
-            ctx.fillText('PLAYER 1', leftX + colW / 2, headerY);
+            ctx.fillText(state.gameMode === '1P' ? 'YOU' : 'PLAYER 1', leftX + colW / 2, headerY);
             ctx.fillStyle = COLORS.paddle2;
-            ctx.fillText('PLAYER 2', rightX + colW / 2, headerY);
+            ctx.fillText(state.gameMode === '1P' ? 'AI' : 'PLAYER 2', rightX + colW / 2, headerY);
 
             // Divider
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
@@ -670,10 +804,14 @@
                 const rowY = startY + i * rowH;
 
                 // Player 1 side
-                drawUpgradeRow(leftX, rowY, colW, rowH - 4, up, state.upgrades.p1[i], state.currency.p1, 'p1', i, COLORS.paddle1);
+                const p1BtnId = 'upgrade_p1_' + i;
+                registerButton(p1BtnId, leftX, rowY, colW, rowH - 4);
+                drawUpgradeRow(leftX, rowY, colW, rowH - 4, up, state.upgrades.p1[i], state.currency.p1, 'p1', i, COLORS.paddle1, isButtonHovered(p1BtnId));
 
                 // Player 2 side
-                drawUpgradeRow(rightX, rowY, colW, rowH - 4, up, state.upgrades.p2[i], state.currency.p2, 'p2', i, COLORS.paddle2);
+                const p2BtnId = 'upgrade_p2_' + i;
+                registerButton(p2BtnId, rightX, rowY, colW, rowH - 4);
+                drawUpgradeRow(rightX, rowY, colW, rowH - 4, up, state.upgrades.p2[i], state.currency.p2, 'p2', i, COLORS.paddle2, isButtonHovered(p2BtnId));
             }
 
             // Instructions
@@ -681,13 +819,16 @@
             ctx.font = '400 ' + Math.max(9, w * 0.008) + 'px Orbitron, monospace';
             ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
             const instrY = shopY + shopH - 14;
-            ctx.fillText('P1: KEYS 1-4 | P2: KEYS 8, 9, 0, -', w / 2, instrY);
+            const isMobile = w < 800;
+            if (!isMobile) {
+                ctx.fillText('P1: KEYS 1-4 | P2: KEYS 8, 9, 0, -', w / 2, instrY);
+            }
 
             ctx.textAlign = 'start';
             ctx.textBaseline = 'alphabetic';
         }
 
-        function drawUpgradeRow(x, y, w, h, upgrade, level, currency, player, index, color) {
+        function drawUpgradeRow(x, y, w, h, upgrade, level, currency, player, index, color, hovered) {
             const maxLevel = 3;
             const isMaxed = level >= maxLevel;
             const cost = isMaxed ? 0 : upgrade.costs[level];
@@ -697,7 +838,7 @@
             const fontSize = Math.max(10, canvas.width * 0.008);
 
             // Row background
-            ctx.fillStyle = canAfford ? 'rgba(68, 255, 136, 0.05)' : 'rgba(255, 255, 255, 0.02)';
+            ctx.fillStyle = hovered && canAfford ? 'rgba(68, 255, 136, 0.12)' : canAfford ? 'rgba(68, 255, 136, 0.05)' : 'rgba(255, 255, 255, 0.02)';
             ctx.beginPath();
             ctx.roundRect(x, y, w, h, 6);
             ctx.fill();
@@ -835,6 +976,91 @@
             ctx.textBaseline = 'alphabetic';
         }
 
+        // --- Mode Select Screen ---
+        function drawModeSelect() {
+            const w = canvas.width;
+            const h = canvas.height;
+            const isMobile = w < 800;
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            // Title
+            ctx.font = '900 ' + Math.max(28, w * 0.035) + 'px Orbitron, monospace';
+            ctx.shadowColor = 'rgba(0, 212, 255, 0.6)';
+            ctx.shadowBlur = 30;
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText('SELECT MODE', w / 2, h * 0.25);
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+
+            // Mode buttons
+            const btnW = Math.min(320, w * 0.7);
+            const btnH = Math.min(80, h * 0.12);
+            const gap = 30;
+
+            // 1P vs AI button
+            const btn1Y = h * 0.45 - btnH / 2;
+            const btn1X = (w - btnW) / 2;
+            registerButton('mode1P', btn1X, btn1Y, btnW, btnH);
+            const hover1 = isButtonHovered('mode1P');
+            drawModeButton(btn1X, btn1Y, btnW, btnH, '1 PLAYER vs AI', COLORS.paddle1, hover1, '\uD83E\uDD16');
+
+            // 2P same device button
+            const btn2Y = h * 0.45 + gap + btnH / 2;
+            const btn2X = (w - btnW) / 2;
+            registerButton('mode2P', btn2X, btn2Y, btnW, btnH);
+            const hover2 = isButtonHovered('mode2P');
+            drawModeButton(btn2X, btn2Y, btnW, btnH, '2 PLAYERS', COLORS.paddle2, hover2, '\uD83C\uDFAE');
+
+            // Subtitle
+            ctx.font = '400 ' + Math.max(10, w * 0.012) + 'px Orbitron, monospace';
+            ctx.fillStyle = COLORS.textDim;
+            if (isMobile) {
+                ctx.fillText('TAP TO SELECT', w / 2, h * 0.82);
+            } else {
+                ctx.fillText('CLICK OR PRESS 1 / 2', w / 2, h * 0.82);
+            }
+
+            ctx.textAlign = 'start';
+            ctx.textBaseline = 'alphabetic';
+        }
+
+        function drawModeButton(x, y, w, h, label, color, hovered, icon) {
+            // Glow on hover
+            if (hovered) {
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 20;
+            }
+
+            // Background
+            ctx.fillStyle = hovered ? 'rgba(255, 255, 255, 0.12)' : 'rgba(255, 255, 255, 0.05)';
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 12);
+            ctx.fill();
+
+            // Border
+            ctx.strokeStyle = hovered ? color : 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = hovered ? 2 : 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 12);
+            ctx.stroke();
+
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+
+            // Icon
+            ctx.font = Math.max(24, w * 0.08) + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(icon, x + 40, y + h / 2);
+
+            // Label
+            ctx.font = '700 ' + Math.max(16, w * 0.06) + 'px Orbitron, monospace';
+            ctx.fillStyle = hovered ? color : COLORS.text;
+            ctx.fillText(label, x + w / 2 + 15, y + h / 2);
+        }
+
         // --- UI Screens ---
         function drawUI() {
             const w = canvas.width;
@@ -860,7 +1086,8 @@
                     ctx.fillStyle = COLORS.text;
                     ctx.shadowColor = 'rgba(255, 255, 255, 0.3)';
                     ctx.shadowBlur = 10;
-                    ctx.fillText('PRESS SPACE TO LAUNCH', w / 2, h / 2 + h * 0.08);
+                    const isMobile = w < 800;
+                    ctx.fillText(isMobile ? 'TAP TO START' : 'PRESS SPACE TO LAUNCH', w / 2, h / 2 + h * 0.08);
                 }
 
                 ctx.shadowBlur = 0;
@@ -875,24 +1102,34 @@
                 ctx.textBaseline = 'alphabetic';
             }
 
+            if (state.phase === 'MODE_SELECT') {
+                drawModeSelect();
+            }
+
             if (state.phase === 'GAME_OVER') {
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 const isP1 = state.score.p1 >= WIN_SCORE;
                 const winColor = isP1 ? COLORS.paddle1 : COLORS.paddle2;
-                const winner = isP1 ? '1' : '2';
+                let winLabel;
+                if (state.gameMode === '1P') {
+                    winLabel = isP1 ? 'YOU WIN!' : 'AI WINS';
+                } else {
+                    winLabel = 'PLAYER ' + (isP1 ? '1' : '2') + ' WINS';
+                }
                 ctx.font = '900 ' + Math.max(48, w * 0.05) + 'px Orbitron, monospace';
                 ctx.shadowColor = winColor;
                 ctx.shadowBlur = 40;
                 ctx.fillStyle = winColor;
-                ctx.fillText('PLAYER ' + winner + ' WINS', w / 2, h / 2 - h * 0.05);
+                ctx.fillText(winLabel, w / 2, h / 2 - h * 0.05);
                 ctx.shadowBlur = 0;
                 ctx.shadowColor = 'transparent';
 
                 if (Math.sin(state.time * 0.05) > 0) {
                     ctx.font = '700 ' + Math.max(16, w * 0.018) + 'px Orbitron, monospace';
                     ctx.fillStyle = COLORS.textDim;
-                    ctx.fillText('PRESS SPACE TO CONTINUE', w / 2, h / 2 + h * 0.06);
+                    const isMobile = w < 800;
+                    ctx.fillText(isMobile ? 'TAP TO CONTINUE' : 'PRESS SPACE TO CONTINUE', w / 2, h / 2 + h * 0.06);
                 }
 
                 ctx.textAlign = 'start';
@@ -937,11 +1174,11 @@
             for (let i = 0; i < UPGRADES.length; i++) {
                 const up = UPGRADES[i];
                 // Player 1
-                if (consumeKey(up.key1)) {
+                if (consumeKey(up.key1) || isButtonClicked('upgrade_p1_' + i)) {
                     tryBuyUpgrade('p1', i);
                 }
                 // Player 2
-                if (consumeKey(up.key2)) {
+                if (consumeKey(up.key2) || isButtonClicked('upgrade_p2_' + i)) {
                     tryBuyUpgrade('p2', i);
                 }
             }
@@ -960,27 +1197,64 @@
             }
         }
 
+        function startGame(mode) {
+            state.gameMode = mode;
+            state.score.p1 = 0;
+            state.score.p2 = 0;
+            state.currency.p1.coins = 0;
+            state.currency.p1.diamonds = 0;
+            state.currency.p2.coins = 0;
+            state.currency.p2.diamonds = 0;
+            state.upgrades.p1 = [0, 0, 0, 0];
+            state.upgrades.p2 = [0, 0, 0, 0];
+            extraBalls.length = 0;
+            ballTrail.length = 0;
+            resetPaddlePositions();
+            resetBall(Math.random() < 0.5 ? 1 : -1);
+            state.phase = 'PLAYING';
+        }
+
         // --- State Transitions ---
         function handleInput() {
-            // Space
+            // Space or tap on title
             if (consumeKey('Space')) {
                 if (state.phase === 'TITLE') {
-                    state.score.p1 = 0;
-                    state.score.p2 = 0;
-                    state.currency.p1.coins = 0;
-                    state.currency.p1.diamonds = 0;
-                    state.currency.p2.coins = 0;
-                    state.currency.p2.diamonds = 0;
-                    state.upgrades.p1 = [0, 0, 0, 0];
-                    state.upgrades.p2 = [0, 0, 0, 0];
-                    extraBalls.length = 0;
-                    ballTrail.length = 0;
-                    resetPaddlePositions();
-                    resetBall(Math.random() < 0.5 ? 1 : -1);
-                    state.phase = 'PLAYING';
+                    state.phase = 'MODE_SELECT';
                 } else if (state.phase === 'GAME_OVER') {
                     state.phase = 'TITLE';
                 }
+            }
+
+            // Title screen: tap anywhere to go to mode select
+            if (state.phase === 'TITLE' && mouse.clicked) {
+                // Don't trigger if a button was clicked
+                if (!isButtonHovered('mode1P') && !isButtonHovered('mode2P')) {
+                    state.phase = 'MODE_SELECT';
+                    mouse.clicked = false;
+                }
+            }
+
+            // Mode select: keyboard shortcuts
+            if (state.phase === 'MODE_SELECT') {
+                if (consumeKey('Digit1')) {
+                    startGame('1P');
+                } else if (consumeKey('Digit2')) {
+                    startGame('2P');
+                }
+            }
+
+            // Mode select: button clicks / taps
+            if (isButtonClicked('mode1P')) {
+                startGame('1P');
+            }
+            if (isButtonClicked('mode2P')) {
+                startGame('2P');
+            }
+
+            // Game over: tap anywhere
+            if (state.phase === 'GAME_OVER' && mouse.clicked) {
+                state.phase = 'TITLE';
+                mouse.clicked = false;
             }
 
             // Escape to pause/unpause
@@ -1052,6 +1326,19 @@
 
             if (state.phase === 'PLAYING' || state.phase === 'SCORED' || state.phase === 'PAUSED' || state.phase === 'CONFIRM_HOME') {
                 drawBall();
+                // Draw touch zone divider hint for 2P mobile
+                if (state.gameMode === '2P' && canvas.width < 800) {
+                    ctx.save();
+                    ctx.setLineDash([8, 12]);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(canvas.width / 2, 60);
+                    ctx.lineTo(canvas.width / 2, canvas.height);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.restore();
+                }
             }
 
             drawUI();
